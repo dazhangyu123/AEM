@@ -1,10 +1,12 @@
 # AEM: Attention Entropy Maximization for Multiple Instance Learning based Whole Slide Image Classification
 
-This repository contains the PyTorch implementation of our paper "[AEM: Attention Entropy Maximization for Multiple Instance Learning based Whole Slide Image Classification](https://arxiv.org/pdf/2406.15303)". The code is built upon the [ACMIL](https://github.com/dazhangyu123/ACMIL) framework.
-
 
 [![arXiv](https://img.shields.io/badge/arXiv-2406.15303-b31b1b.svg)](https://arxiv.org/pdf/2406.15303)
 [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-sm-dark.svg)](https://huggingface.co/datasets/dazhangyu123/AEM-dataset)
+
+
+
+This repository contains the PyTorch implementation of our paper "[AEM: Attention Entropy Maximization for Multiple Instance Learning based Whole Slide Image Classification](https://arxiv.org/pdf/2406.15303)". The code is built upon the [ACMIL](https://github.com/dazhangyu123/ACMIL) framework.
 
 
 ## Overview
