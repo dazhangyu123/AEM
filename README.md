@@ -8,6 +8,8 @@
 
 This repository contains the PyTorch implementation of our paper "[AEM: Attention Entropy Maximization for Multiple Instance Learning based Whole Slide Image Classification](https://arxiv.org/pdf/2406.15303)". The code is built upon the [ACMIL](https://github.com/dazhangyu123/ACMIL) framework.
 
+## News
+**[2025.4]** We enhanced the AEM by applying it to attention values of the top-k instances (see Lines 228-235 in [main.py](main.py)). Based on our experiments, setting ```k=100``` and ```lambda=0.1``` consistently produced stable results. We welcome you to try these parameters and share your feedback.
 
 ## Overview
 
@@ -32,7 +34,7 @@ We provide pre-extracted features to facilitate the reproduction of our results.
 |-------|-------------|
 | ImageNet supervised ResNet18 | [Download](https://pan.quark.cn/s/dd77e6a476a0) |
 | SSL ViT-S/16 | [Download](https://pan.quark.cn/s/6ea54bfa0e72) |
-| PathGen-CLIP ViT-L (336 × 336 pixels) | [Download](https://pan.quark.cn/s/62fe3dc65291) |
+| PathGen-CLIP ViT-L (336 × 336 pixels) | [Download](https://pan.quark.cn/s/d4ce15c69b1a) |
 
 ### CAMELYON17 Dataset Features
 

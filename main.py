@@ -23,29 +23,36 @@ from timm.utils import accuracy
 import torchmetrics
 import time
 import wandb
+import scipy.stats as stats
+import numpy as np
+from typing import Tuple
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 criterion = nn.CrossEntropyLoss()
 
 def get_arguments():
     parser = argparse.ArgumentParser('WSI classification training', add_help=False)
-    parser.add_argument('--config', dest='config', default='config/camelyon17_config.yml',
+    parser.add_argument('--config', dest='config', default='config/bracs_config.yml',
                         help='settings of dataset in yaml format')
     parser.add_argument(
-        "--seed", type=int, default=5, help="set the random seed to ensure reproducibility"
+        "--seed", type=int, default=2, help="set the random seed to ensure reproducibility"
     )
     parser.add_argument('--wandb_mode', default='disabled', choices=['offline', 'online', 'disabled'],
                         help='the model of wandb')
-    parser.add_argument('--arch', default='mha', choices=['abmil', 'mha', 'dsmil'],
+    parser.add_argument('--arch', default='abmil', choices=['abmil', 'mha', 'dsmil'],
                         help='the MIL method choice')
-    parser.add_argument("--lamda", type=float, default=0.0,
+    parser.add_argument("--lamda", type=float, default=0.1,
                         help='lambda used for balancing cross-entropy loss and rank loss.')
-    parser.add_argument('--pretrain', default='natural_supervised', choices=['natural_supervised', 'medical_ssl', 'plip', 'path-clip-B-AAAI',
-                                                                      'path-clip-B', 'path-clip-L-336', 'openai-clip-B',
-                                                                      'openai-clip-L-336', 'quilt-net', 'biomedclip'],
+    parser.add_argument("--top_k", default=-1, type=int, help="Top-K instances for using the AEM loss.")
+    parser.add_argument('--pretrain', default='conch', choices=['natural_supervised', 'medical_ssl', 'plip', 'path-clip-B-AAAI',
+                                                                      'path-clip-B', 'path-clip-L-336', 'openai-clip-B', 'conch',
+                                                                     'openai-clip-L-336', 'quilt-net', 'biomedclip', 'UNI', 'GigaPath'],
                         help='pretrain methods')
     parser.add_argument(
-        "--lr", type=float, default=0.0001, help="learning rate"
+        "--lr", type=float, default=0.0002, help="learning rate"
+    )
+    parser.add_argument(
+        "--accumulation_steps", type=int, default=1, help="Steps of loss accumulation."
     )
     parser.add_argument("--subsampling", type=float, default=1.0, help='the ratio of subsampling')
     args = parser.parse_args()
@@ -61,6 +68,7 @@ def main():
         c.update(vars(args))
         conf = Struct(**c)
 
+    conf.lr = conf.lr * conf.accumulation_steps
     if conf.pretrain == 'medical_ssl':
         conf.D_feat = 384
         conf.D_inner = 128
@@ -68,12 +76,19 @@ def main():
         conf.D_feat = 512
         conf.D_inner = 256
     elif conf.pretrain == 'path-clip-B' or conf.pretrain == 'openai-clip-B' or conf.pretrain == 'plip'\
-            or conf.pretrain == 'quilt-net'  or conf.pretrain == 'path-clip-B-AAAI'  or conf.pretrain == 'biomedclip':
+            or conf.pretrain == 'quilt-net'  or conf.pretrain == 'path-clip-B-AAAI'  or conf.pretrain == 'biomedclip' or conf.pretrain == 'conch':
         conf.D_feat = 512
         conf.D_inner = 256
     elif conf.pretrain == 'path-clip-L-336' or conf.pretrain == 'openai-clip-L-336':
         conf.D_feat = 768
         conf.D_inner = 384
+    elif conf.pretrain == 'UNI':
+        conf.D_feat = 1024
+        conf.D_inner = 512
+    elif conf.pretrain == 'GigaPath':
+        conf.D_feat = 1536
+        conf.D_inner = 768
+
 
     # start a new wandb run to track this script
     wandb.init(
@@ -85,6 +100,7 @@ def main():
                 'loss_form': conf.arch,
                 'lamda': conf.lamda,
                 'subsampling': conf.subsampling,
+                'top_k': conf.top_k,
                 'seed': conf.seed,},
         mode=conf.wandb_mode
     )
@@ -104,11 +120,11 @@ def main():
     train_data, val_data, test_data = build_HDF5_feat_dataset(os.path.join(conf.data_dir, 'patch_feats_pretrain_%s.h5'%conf.pretrain), conf)
 
     train_loader = DataLoader(train_data, batch_size=conf.B, shuffle=True,
-                              num_workers=conf.n_worker, pin_memory=conf.pin_memory, drop_last=True)
+                              num_workers=conf.n_worker, pin_memory=conf.pin_memory, drop_last=True, persistent_workers=True)
     val_loader = DataLoader(val_data, batch_size=conf.B, shuffle=False,
-                             num_workers=conf.n_worker, pin_memory=conf.pin_memory, drop_last=False)
+                             num_workers=conf.n_worker, pin_memory=conf.pin_memory, drop_last=False, persistent_workers=True)
     test_loader = DataLoader(test_data, batch_size=conf.B, shuffle=False,
-                             num_workers=conf.n_worker, pin_memory=conf.pin_memory, drop_last=False)
+                             num_workers=conf.n_worker, pin_memory=conf.pin_memory, drop_last=False, persistent_workers=True)
 
     # define network
     if conf.arch == 'abmil':
@@ -125,7 +141,8 @@ def main():
     model.to(device)
 
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=conf.wd)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=conf.lr, weight_decay=conf.wd)
+
     # Record the start time
     start_time = time.time()
 
@@ -137,17 +154,6 @@ def main():
         val_auc, val_acc, val_f1, val_loss, val_div_loss = evaluate(model, val_loader, device, conf, 'Val')
         test_auc, test_acc, test_f1, test_loss, test_div_loss = evaluate(model, test_loader, device, conf, 'Test')
 
-        if conf.wandb_mode != 'disabled':
-            wandb.log({'test/test_acc1': test_acc}, commit=False)
-            wandb.log({'test/test_auc': test_auc}, commit=False)
-            wandb.log({'test/test_f1': test_f1}, commit=False)
-            wandb.log({'test/test_loss': test_loss}, commit=False)
-            wandb.log({'test/test_div_loss': test_div_loss}, commit=False)
-            wandb.log({'val/val_acc1': val_acc}, commit=False)
-            wandb.log({'val/val_auc': val_auc}, commit=False)
-            wandb.log({'val/val_f1': val_f1}, commit=False)
-            wandb.log({'val/val_loss': val_loss}, commit=False)
-            wandb.log({'val/val_div_loss': val_div_loss}, commit=False)
 
 
         if val_f1 + val_auc > best_state['val_f1'] + best_state['val_auc']:
@@ -183,10 +189,12 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, conf):
     model.train()
 
     metric_logger = MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    # metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 100
 
+    # 添加梯度累积相关参数
+    optimizer.zero_grad()   # 在epoch开始时清零梯度
 
     for data_it, data in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         image_patches = data['input'].to(device, dtype=torch.float32)
@@ -217,17 +225,30 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, conf):
         if conf.arch == 'mha' or conf.arch == 'dsmil':
             div_loss = torch.sum(F.softmax(attn, dim=-1) * F.log_softmax(attn, dim=-1)) / attn.shape[0]
         else:
-            div_loss = torch.sum(F.softmax(attn, dim=-1) * F.log_softmax(attn, dim=-1))
+            if conf.top_k > 0:
+                A_softmax = torch.softmax(attn, dim=-1)
+                values, _ = torch.topk(A_softmax, min(conf.top_k, A_softmax.size(-1)), dim=-1)
+                values_sum = values.sum(dim=-1, keepdim=True)
+                values_normalized = values / values_sum
+                div_loss = torch.sum(values_normalized * torch.log(values_normalized))
+            else:
+                div_loss = torch.sum(F.softmax(attn, dim=-1) * F.log_softmax(attn, dim=-1))
 
 
-        weight = conf.lamda
-        loss = weight * div_loss + bag_loss
 
-        optimizer.zero_grad()
+        # Compute weight
+        loss = conf.lamda * div_loss + bag_loss
+
+        # 将损失除以累积步数
+        loss = loss / conf.accumulation_steps
         loss.backward()
-        optimizer.step()
 
-        metric_logger.update(lr=optimizer.param_groups[0]['lr'])
+        # 每accumulation_steps步进行一次参数更新
+        if (data_it + 1) % conf.accumulation_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+
+        # metric_logger.update(lr=optimizer.param_groups[0]['lr'])
         metric_logger.update(slide_loss=bag_loss.item())
         metric_logger.update(div_loss=div_loss.item())
 
@@ -237,6 +258,11 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, conf):
             """
             wandb.log({'div_loss': div_loss}, commit=False)
             wandb.log({'bag_loss': bag_loss})
+
+    # 处理最后不足accumulation_steps的batch
+    if (data_it + 1) % conf.accumulation_steps != 0:
+        optimizer.step()
+        optimizer.zero_grad()
 
 
 # Disable gradient calculation during evaluation
@@ -248,6 +274,8 @@ def evaluate(model, data_loader, device, conf, header):
 
     y_pred = []
     y_true = []
+    attention_entropies = []
+    validation_losses = []
 
     metric_logger = MetricLogger(delimiter="  ")
     for data in metric_logger.log_every(data_loader, 100, header):
@@ -268,7 +296,9 @@ def evaluate(model, data_loader, device, conf, header):
             loss = criterion(bag_logit, label)
             pred = torch.softmax(bag_logit, dim=-1)
 
-
+        # 记录每个batch的loss和entropy
+        attention_entropies.append(div_loss.item())
+        validation_losses.append(loss.item())
         acc1 = accuracy(pred, label, topk=(1,))[0]
 
         metric_logger.update(loss=loss.item())
@@ -281,15 +311,32 @@ def evaluate(model, data_loader, device, conf, header):
     y_pred = torch.cat(y_pred, dim=0)
     y_true = torch.cat(y_true, dim=0)
 
-    AUROC_metric = torchmetrics.AUROC(num_classes = conf.n_class, average = 'macro').to(device)
+    # 计算Pearson相关系数
+    correlation, p_value = stats.pearsonr(attention_entropies, validation_losses)
+
+    AUROC_metric = torchmetrics.AUROC(task="multiclass", num_classes = conf.n_class, average = 'macro').to(device)
     AUROC_metric(y_pred, y_true)
     auroc = AUROC_metric.compute().item()
-    F1_metric = torchmetrics.F1Score(num_classes = conf.n_class, average = 'macro').to(device)
+    F1_metric = torchmetrics.F1Score(task="multiclass", num_classes = conf.n_class, average = 'macro').to(device)
     F1_metric(y_pred, y_true)
     f1_score = F1_metric.compute().item()
+    # AUROC_metric = torchmetrics.AUROC(num_classes = conf.n_class, average = 'macro').to(device)
+    # AUROC_metric(y_pred, y_true)
+    # auroc = AUROC_metric.compute().item()
+    # F1_metric = torchmetrics.F1Score(num_classes = conf.n_class, average = 'macro').to(device)
+    # F1_metric(y_pred, y_true)
+    # f1_score = F1_metric.compute().item()
 
-    print('* Acc@1 {top1.global_avg:.3f} loss {losses.global_avg:.3f} div_loss {div_losses.global_avg:.3f} auroc {AUROC:.3f} f1_score {F1:.3f}'
-          .format(top1=metric_logger.acc1, losses=metric_logger.loss, div_losses=metric_logger.div_loss, AUROC=auroc, F1=f1_score))
+    print('* Acc@1 {top1.global_avg:.3f} loss {losses.global_avg:.3f} div_loss {div_losses.global_avg:.3f} auroc {AUROC:.3f} f1_score {F1:.3f} Correlation {correlation: .3f}'
+          .format(top1=metric_logger.acc1, losses=metric_logger.loss, div_losses=metric_logger.div_loss, AUROC=auroc, F1=f1_score, correlation=correlation))
+
+    if conf.wandb_mode != 'disabled':
+        wandb.log({'%s/acc1'%header: metric_logger.acc1.global_avg}, commit=False)
+        wandb.log({'%s/auc'%header: auroc}, commit=False)
+        wandb.log({'%s/f1'%header: f1_score}, commit=False)
+        wandb.log({'%s/loss'%header: metric_logger.loss.global_avg}, commit=False)
+        wandb.log({'%s/div_loss'%header: metric_logger.div_loss.global_avg}, commit=False)
+        wandb.log({'%s/pearson_correlation' % header: correlation}, commit=False)
 
     return auroc, metric_logger.acc1.global_avg, f1_score, metric_logger.loss.global_avg, metric_logger.div_loss.global_avg
 
