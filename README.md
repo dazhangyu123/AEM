@@ -11,7 +11,7 @@ This repository contains the PyTorch implementation of our paper "[AEM: Attentio
 ## News
 **[2025.6]** Our paper has been accepted to MICCAI 2025! 🎉 We have updated the arXiv version of our paper with the camera-ready version.
 
-**[2025.4]** We enhanced the AEM by applying it to attention values of the top-k instances (see Lines 228-235 in [main.py](main.py)). Based on our experiments, setting ```k=100``` and ```lambda=0.1``` consistently produced stable results. We welcome you to try these parameters and share your feedback.
+~~**[2025.4]** We enhanced the AEM by applying it to attention values of the top-k instances (see Lines 228-235 in [main.py](main.py)). Based on our experiments, setting ```k=100``` and ```lambda=0.1``` consistently produced stable results. We welcome you to try these parameters and share your feedback.~~
 
 ## Overview
 
